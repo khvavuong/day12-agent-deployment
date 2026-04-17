@@ -9,7 +9,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=development
       - AGENT_API_KEY=${AGENT_API_KEY}
-      - OPEN_AI_API_KEY=${OPEN_AI_API_KEY}
+      - OPEN_API_KEY=${OPEN_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
