@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class HealthAgent:
     def __init__(self):
-        self.disclaimer = "⚠️ Lưu ý: Thông tin chỉ mang tính tham khảo, không thay thế chẩn đoán của bác sĩ."
+        self.disclaimer = " Lưu ý: Thông tin chỉ mang tính tham khảo, không thay thế chẩn đoán của bác sĩ."
 
     def route_request(self, message: str, context: Optional[Dict] = None) -> Dict:
         """

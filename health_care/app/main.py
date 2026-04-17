@@ -1,14 +1,3 @@
-"""
-Production AI Agent — Health Advisor
-Checklist compliant:
-✅ Modular structure (Auth, Rate Limit, Cost Guard, Tools, Agent)
-✅ API Key auth
-✅ Redis-based rate limiting
-✅ Cost guard
-✅ Health + Readiness checks
-✅ Graceful shutdown
-✅ Static Frontend Serving
-"""
 import time
 import signal
 import logging
