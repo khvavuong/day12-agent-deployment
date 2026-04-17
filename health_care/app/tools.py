@@ -1,5 +1,39 @@
+import logging
 from typing import List, Dict, Optional, Literal
+
 from pydantic import BaseModel
+from openai import OpenAI
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+_client: Optional[OpenAI] = None
+
+
+def _get_openai_client() -> Optional[OpenAI]:
+    global _client
+    if not settings.openai_api_key:
+        return None
+    if _client is None:
+        _client = OpenAI(api_key=settings.openai_api_key)
+    return _client
+
+
+def _call_llm(system_prompt: str, user_prompt: str) -> str:
+    client = _get_openai_client()
+    if client is None:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    response = client.responses.create(
+        model=settings.llm_model,
+        input=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.2,
+    )
+    return (response.output_text or "").strip()
 
 class ToolResponse(BaseModel):
     answer: str
@@ -12,23 +46,26 @@ def medical_knowledge_tool(query: str, context: Optional[Dict] = None) -> ToolRe
     Medical Knowledge Tool (RAG).
     Provides verified medical information.
     """
-    # Mock knowledge base
-    knowledge_base = {
-        "đau đầu": "Đau đầu có thể do nhiều nguyên nhân như căng thẳng, thiếu ngủ hoặc vấn đề về thị lực. Bạn nên nghỉ ngơi và uống đủ nước.",
-        "sốt": "Sốt là phản ứng của cơ thể chống lại nhiễm trùng. Nếu sốt cao trên 38.5 độ C, bạn có thể sử dụng paracetamol theo hướng dẫn.",
-        "covid": "COVID-19 là bệnh đường hô hấp do virus SARS-CoV-2 gây ra. Triệu chứng thường gặp là ho, sốt và mất vị giác.",
-        "ngủ": "Giấc ngủ đủ (7-9 tiếng) rất quan trọng cho sức khỏe tim mạch và trí não."
-    }
-    
-    answer = "Xin lỗi, tôi chưa có thông tin cụ thể về vấn đề này. Tuy nhiên, bạn nên tham khảo các nguồn uy tín như WHO hoặc CDC."
-    sources = ["WHO", "CDC"]
-    
-    for key, value in knowledge_base.items():
-        if key in query.lower():
-            answer = value
-            break
-            
-    return ToolResponse(answer=answer, sources=sources)
+    system_prompt = (
+        "You are a careful healthcare information assistant. "
+        "Answer in Vietnamese with concise medical education only, no diagnosis certainty. "
+        "Use cautious wording like 'co the' or 'kha nang'. "
+        "If emergency red flags appear, advise urgent in-person care."
+    )
+    user_prompt = (
+        f"Cau hoi: {query}\n"
+        "Tra loi ngan gon, ro rang, theo y hoc thong thuong. "
+        "Cuoi cau tra loi, nhac nguoi dung tham khao bac si neu trieu chung keo dai."
+    )
+    try:
+        answer = _call_llm(system_prompt, user_prompt)
+    except Exception as exc:
+        logger.error("medical_knowledge_tool LLM call failed: %s", exc)
+        answer = (
+            "Toi tam thoi khong lay duoc noi dung tu LLM. "
+            "Ban co the tham khao WHO/CDC va lien he bac si neu can."
+        )
+    return ToolResponse(answer=answer, sources=["WHO", "CDC"])
 
 def symptom_checker_tool(symptoms: List[str], duration: str, age: int) -> ToolResponse:
     """
@@ -37,37 +74,65 @@ def symptom_checker_tool(symptoms: List[str], duration: str, age: int) -> ToolRe
     """
     symptoms_str = ", ".join(symptoms).lower()
     urgency = "low"
-    advice = "Theo dõi thêm tình trạng sức khỏe của bạn."
-    
-    if any(s in symptoms_str for s in ["đau ngực", "khó thở", "ngất"]):
+    if any(s in symptoms_str for s in ["dau nguc", "kho tho", "ngat", "đau ngực", "khó thở", "ngất"]):
         urgency = "high"
-        advice = "TRIỆU CHỨNG NGUY HIỂM: Hãy gọi cấp cứu hoặc đến cơ sở y tế gần nhất ngay lập tức."
-    elif any(s in symptoms_str for s in ["sốt cao", "đau bụng dữ dội"]):
+    elif any(s in symptoms_str for s in ["sot cao", "dau bung du doi", "sốt cao", "đau bụng dữ dội"]):
         urgency = "medium"
-        advice = "Bạn nên đi khám bác sĩ trong vòng 24 giờ tới."
-        
-    answer = f"Dựa trên các triệu chứng ({symptoms_str}) trong {duration}, mức độ ưu tiên của bạn là: {urgency}. {advice}"
-    
+
+    system_prompt = (
+        "You are a triage-style health assistant. "
+        "Do not provide definitive diagnosis. "
+        "Output in Vietnamese, include urgency guidance and safe next steps."
+    )
+    user_prompt = (
+        f"Tuoi: {age}\n"
+        f"Trieu chung: {', '.join(symptoms)}\n"
+        f"Thoi gian: {duration}\n"
+        f"Muc do uu tien tam tinh: {urgency}\n"
+        "Hay viet huong dan ngan gon, nhan manh dau hieu can di cap cuu neu co."
+    )
+    try:
+        answer = _call_llm(system_prompt, user_prompt)
+    except Exception as exc:
+        logger.error("symptom_checker_tool LLM call failed: %s", exc)
+        if urgency == "high":
+            answer = (
+                "Co the co dau hieu nguy hiem. "
+                "Ban nen goi cap cuu hoac den co so y te gan nhat ngay lap tuc."
+            )
+        elif urgency == "medium":
+            answer = "Ban co the nen di kham trong 24 gio de duoc danh gia ky hon."
+        else:
+            answer = "Ban co the theo doi them, nghi ngoi va bu nuoc. Neu nang len, hay di kham."
+
     return ToolResponse(
-        answer=answer, 
-        urgency=urgency,
-        metadata={"symptoms": symptoms, "duration": duration, "age": age}
+        answer=answer,
+        urgency=urgency,  # type: ignore[arg-type]
+        metadata={"symptoms": symptoms, "duration": duration, "age": age},
     )
 
 def lifestyle_tool(goal: str, age: int, habits: Dict) -> ToolResponse:
     """
     Lifestyle Recommendation Tool.
     """
-    recommendations = [
-        "Uống ít nhất 2 lít nước mỗi ngày.",
-        "Tập thể dục ít nhất 30 phút mỗi ngày.",
-        "Hạn chế thức khuya và sử dụng thiết bị điện tử trước khi ngủ."
-    ]
-    
-    if "giảm cân" in goal.lower():
-        recommendations.append("Tăng cường chất xơ và giảm lượng đường tinh luyện.")
-    elif "cơ bắp" in goal.lower():
-        recommendations.append("Bổ sung protein và tập các bài tập kháng lực.")
-        
-    answer = "Dưới đây là một số khuyến nghị lối sống dành cho bạn:\n- " + "\n- ".join(recommendations)
+    system_prompt = (
+        "You are a preventive healthcare coach. "
+        "Provide practical, safe, non-prescriptive lifestyle advice in Vietnamese."
+    )
+    user_prompt = (
+        f"Muc tieu: {goal}\n"
+        f"Tuoi: {age}\n"
+        f"Thoi quen hien tai: {habits}\n"
+        "Tra loi ngan gon theo dang bullet, uu tien hanh dong co the thuc hien ngay."
+    )
+    try:
+        answer = _call_llm(system_prompt, user_prompt)
+    except Exception as exc:
+        logger.error("lifestyle_tool LLM call failed: %s", exc)
+        answer = (
+            "De bat dau, ban co the: \n"
+            "- Uong du nuoc moi ngay.\n"
+            "- Tap the duc it nhat 30 phut/ngay.\n"
+            "- Ngu du 7-8 tieng va han che thuc khuya."
+        )
     return ToolResponse(answer=answer)
