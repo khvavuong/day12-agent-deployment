@@ -43,7 +43,7 @@ class Settings:
             if self.agent_api_key == "dev-key-change-me":
                 raise ValueError("AGENT_API_KEY must be set in production!")
         if not self.openai_api_key:
-            logger.warning("OPENAI_API_KEY not set — using mock LLM")
+            logger.warning("OPENAI_API_KEY not set — LLM calls will fail until configured")
         return self
 
 settings = Settings().validate()
