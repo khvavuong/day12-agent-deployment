@@ -8,7 +8,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=production
-      - AGENT_API_KEY=prod-key-123
+      - AGENT_API_KEY=${AGENT_API_KEY}
     depends_on:
       redis:
         condition: service_healthy
