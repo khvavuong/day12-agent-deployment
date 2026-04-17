@@ -1,32 +1,35 @@
 """
-Production AI Agent — Health Care Submission
+Production AI Agent — Health Advisor
 Checklist compliant:
-✅ Modular structure
+✅ Modular structure (Auth, Rate Limit, Cost Guard, Tools, Agent)
 ✅ API Key auth
 ✅ Redis-based rate limiting
 ✅ Cost guard
 ✅ Health + Readiness checks
 ✅ Graceful shutdown
+✅ Static Frontend Serving
 """
 import time
 import signal
 import logging
 import json
+import os
+from typing import Optional
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Security, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 import uvicorn
 
 from app.config import settings
-from app.auth import verify_api_key
+from app.auth import verify_api_key, COOKIE_NAME
 from app.rate_limiter import check_rate_limit
 from app.cost_guard import check_and_record_cost, get_current_cost
-
-# Mock LLM
-from utils.mock_llm import ask as llm_ask
+from app.agent import agent
 
 # Logging
 logging.basicConfig(
@@ -37,8 +40,6 @@ logger = logging.getLogger(__name__)
 
 START_TIME = time.time()
 _is_ready = False
-_request_count = 0
-_error_count = 0
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,8 +49,6 @@ async def lifespan(app: FastAPI):
         "app": settings.app_name,
         "version": settings.app_version,
     }))
-    # Simulate initialization
-    time.sleep(0.1)
     _is_ready = True
     yield
     _is_ready = False
@@ -69,76 +68,66 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
 
-@app.middleware("http")
-async def request_middleware(request: Request, call_next):
-    global _request_count, _error_count
-    start = time.time()
-    _request_count += 1
-    try:
-        response: Response = await call_next(request)
-        # Security headers
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        duration = round((time.time() - start) * 1000, 1)
-        logger.info(json.dumps({
-            "event": "request",
-            "method": request.method,
-            "path": request.url.path,
-            "status": response.status_code,
-            "ms": duration,
-        }))
-        return response
-    except Exception as e:
-        _error_count += 1
-        logger.exception("Middleware caught exception")
-        raise
+# Static Files
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-# Models
-class AskRequest(BaseModel):
-    question: str = Field(..., min_length=1, max_length=2000)
+# Models for /chat
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    context: Optional[dict] = Field(default_factory=dict)
 
-class AskResponse(BaseModel):
-    question: str
-    answer: str
-    model: str
+class ChatResponse(BaseModel):
+    reply: str
+    tool_used: str
     timestamp: str
 
 # Endpoints
-@app.get("/", tags=["Info"])
-def root():
-    return {
-        "app": settings.app_name,
-        "version": settings.app_version,
-        "status": "running"
-    }
+@app.get("/")
+async def serve_frontend():
+    index_path = os.path.join(static_dir, "index.html")
+    if os.path.exists(index_path):
+        response = FileResponse(index_path)
+        response.set_cookie(
+            key=COOKIE_NAME,
+            value=settings.agent_api_key,
+            httponly=True,
+            secure=settings.environment == "production",
+            samesite="strict",
+            max_age=60 * 60 * 12,
+        )
+        return response
+    return {"message": "Frontend not found. Check app/static/index.html"}
 
-@app.post("/ask", response_model=AskResponse, tags=["Agent"])
-async def ask_agent(
-    body: AskRequest,
+@app.post("/chat", response_model=ChatResponse, tags=["Agent"])
+async def chat_endpoint(
+    body: ChatRequest,
     _key: str = Depends(verify_api_key),
 ):
-    # Rate limit (stateless via Redis)
+    # 1. Rate Limiting (Stateless)
     check_rate_limit(_key[:8])
 
-    # Budget check (stateless via Redis)
-    input_tokens = len(body.question.split()) * 2
+    # 2. Budget Check (Stateless)
+    input_tokens = len(body.message.split()) * 2
     check_and_record_cost(input_tokens, 0)
 
-    answer = llm_ask(body.question)
+    # 3. Agent Processing (Routing + Tools + Safety)
+    result = agent.route_request(body.message, body.context)
 
-    output_tokens = len(answer.split()) * 2
+    # 4. Recording Cost (Output)
+    output_tokens = len(result["reply"].split()) * 2
     check_and_record_cost(0, output_tokens)
 
-    return AskResponse(
-        question=body.question,
-        answer=answer,
-        model=settings.llm_model,
+    return ChatResponse(
+        reply=result["reply"],
+        tool_used=result["tool_used"],
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
 @app.get("/health", tags=["Operations"])
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @app.get("/ready", tags=["Operations"])
 def ready():
@@ -150,17 +139,15 @@ def ready():
 def metrics(_key: str = Depends(verify_api_key)):
     return {
         "uptime_seconds": round(time.time() - START_TIME, 1),
-        "total_requests": _request_count,
-        "error_count": _error_count,
         "daily_cost_usd": round(get_current_cost(), 4),
         "daily_budget_usd": settings.daily_budget_usd,
     }
 
-# Handle SIGTERM for graceful shutdown
+# Graceful Shutdown
 def handle_signal(signum, frame):
     logger.info(f"Received signal {signum}")
 
 signal.signal(signal.SIGTERM, handle_signal)
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=settings.debug)
+    uvicorn.run("app.main:app", host=settings.host, port=settings.port)

@@ -7,7 +7,7 @@ services:
       - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - ENVIRONMENT=production
+      - ENVIRONMENT=development
       - AGENT_API_KEY=${AGENT_API_KEY}
       - OPEN_AI_API_KEY=${OPEN_AI_API_KEY}
     depends_on:
